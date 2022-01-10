@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: S3 bucket to EventBridge to Lambda - @jbesw
+
+Parameters:
+  PhoneNumber:
+    Type: String
+    Description: Phone number to send SMS messages
+  Email:
+    Type: String
+    Description: Email address to send SNS notification
+
+Resources:
+
+  ## S3 bucket
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  # Enforce HTTPS only access to S3 bucket #
+  BucketForImagePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SourceBucket
+      PolicyDocument:
+        Statement:
+        - Action: s3:*
+          Effect: Deny
+          Principal: "*"
+          Resource:
+          - !Sub "arn:aws:s3:::${SourceBucket}/*"
+          - !Sub "arn:aws:s3:::${SourceBucket}"
+          Condition:
+            Bool:
+              aws:SecureTransport: false
+
+  ## Lambda function
+  MyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.handler
+      Runtime: nodejs14.x
+      MemorySize: 128
+      Timeout: 3
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref SourceBucket
+
+  ## SNS Topic
+  MySnsTopic:
+    Type: AWS::SNS::Topic
+
+  ## SNS Subscription
+  SnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      #Protocol: sms
+      #Endpoint: !Ref PhoneNumber
+      Protocol: email
+      Endpoint: !Ref Email
+      TopicArn: !Ref MySnsTopic
+
+  # Define the event rule to filter for events
+  EventRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "EventRule"
+      EventPattern: 
+        account: 
+          - !Sub '${AWS::AccountId}'
+        source:
+          - aws.s3
+        detail-type: 
+          - "Object Created"
+        detail:
+          bucket:
+            name:
+              - !Ref SourceBucket
+      Targets: 
+        - Arn: !Ref MySnsTopic
+          Id: "SNStopic"
+        - Arn: !GetAtt MyFunction.Arn
+          Id: "LambdaTarget"
+
+  # Allow EventBridge to invoke SNS
+  EventBridgeToToSnsPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties: 
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: events.amazonaws.com
+          Action: sns:Publish
+          Resource: !Ref MySnsTopic
+      Topics: 
+        - !Ref MySnsTopic  
+
+  # Allow EventBridge to invoke Lambda
+  EventBridgeToLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MyFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceAccount: !Sub '${AWS::AccountId}'
+      SourceArn: 
+        Fn::GetAtt: 
+          - "EventRule"
+          - "Arn"
+
+Outputs:
+  SourceBucketName:
+    Value: !Ref SourceBucket
+    Description: S3 Bucket for object storage
+  FunctionArn:
+    Value: !Ref MyFunction
+    Description: MyFunction ARN
